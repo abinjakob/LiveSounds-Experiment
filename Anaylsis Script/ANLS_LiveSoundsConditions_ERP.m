@@ -36,7 +36,7 @@ clear all; clc; close all;
 
 % -- Files & Folders --
 % working data folder 
-foldername = 'TestRecording03_23102025';
+foldername = 'SUB01_24102025';
 % audio file to pick audio onsets 
 soundscapefile = 'office-01.mp3'; 
 % path to directory 
@@ -65,8 +65,13 @@ save_fig = true;
 
 %% DETECTING AUDIO ONSETS 
 
-% prepare directory and files
+% add paths 
 cd(fullfile(rootpath, 'Analysis Scripts'));
+addpath(fullfile(rootpath, 'Audio Files'));
+filepath = fullfile(rootpath, foldername); 
+addpath(filepath);
+
+
 foldersplit = strsplit(foldername, '_');
 subjid = foldersplit{1}; 
 livesoundsfile = [subjid, '_sticks_sounds_recording.wav'];
@@ -76,7 +81,7 @@ livesoundsfile = [subjid, '_sticks_sounds_recording.wav'];
 duration = length(y) / Fs; 
 timevec = linspace(0, duration, length(y));
 display(['Computing audio onsets for file ', livesoundsfile])
-[onsets_live, info_live] = onset_detect_audio(fullfile(rootpath, foldername, livesoundsfile));
+[onsets_live, info_live] = onset_detect_audio(livesoundsfile);
 % removing the first two onset as it is experiment begin beep tone 
 onsets_live(1:2) = []; 
 display([num2str(numel(onsets_live)), ' onsets detected'])
@@ -86,7 +91,7 @@ display([num2str(numel(onsets_live)), ' onsets detected'])
 duration2 = length(x) / Fs2; 
 timevec2 = linspace(0, duration2, length(x));
 display(['Computing audio onsets for file ', soundscapefile])
-[onsets_soundscape, info_soundscape] = onset_detect_audio(fullfile(rootpath, 'Audio Files', soundscapefile));
+[onsets_soundscape, info_soundscape] = onset_detect_audio(soundscapefile);
 % removing the first two onset as it is experiment begin beep tone 
 onsets_soundscape(1:2) = []; 
 display([num2str(numel(onsets_soundscape)), ' onsets detected'])
@@ -127,12 +132,113 @@ set(gca, 'FontSize', s.plt_fontsize);
 
 %% ANALYSING EEG FOR DIFFERENT CONDITIONS 
 
-% files to load 
-eegfiles = {'_LiveSounds_Record.set', '_LiveSounds_Playback.set', '_LiveSounds_PlaybackNoise.set'};
+% eeg file names
+eegfiles = {'_LiveSounds_Record', '_LiveSounds_Playback', '_LiveSounds_PlaybackNoise'};
+eegdata = [];
+events  = {'AudioOnset'};
 
 % open EEGLAB
 [ALLEEG EEG CURRENTSET ALLCOM] = eeglab;
 
+% -- Setting up Plots --
+% create figure folder if doesn't exist
+plotfolder = fullfile(filepath,'Figures');
+if ~exist(plotfolder, 'dir')
+    mkdir(plotfolder);
+    display('New Folder Created for Saving Plots')
+end
+% import plot styles
+% ![ Important: requires the custom function 'plotStyles' ]
+s = plotStyles();
+clr = ['r', 'b', 'm', 'k'];
+if re_ref == 2
+    channels2plot = [8 4 9 13];
+else 
+    channels2plot = [8 4 9 14];
+end 
+
+for fidx = 1:numel(eegfiles)
+    eegfile = [subjid ,eegfiles{fidx}, '.set']; 
+    display(['Loading EEG file ', eegfile])
+    EEG = pop_loadset('filename', eegfile, 'filepath', filepath);
+    
+    % -- EEG Preprocessing 
+    % filtering
+    disp(['Data Filtering: LP = ', num2str(LP), ' HP = ', num2str(HP)])
+    EEG = pop_firws(EEG, 'fcutoff', LP, 'ftype', 'lowpass', 'wtype', 'hamming', 'forder', LPorder);
+    EEG = pop_firws(EEG, 'fcutoff', HP, 'ftype', 'highpass', 'wtype', 'hamming', 'forder', HPorder);
+    % re-referencing
+    if re_ref == 1
+        % re-referencing to CAR
+        EEG = pop_reref(EEG, [], 'refstate',0);
+        display('Re-referenced to CAR')
+    elseif re_ref == 2
+        % re-referencing to mastoids
+        EEG = pop_reref( EEG, [11 15] );
+        display('Re-referenced to Mastoids')
+    end 
+    % select the EEG segment during the audio 
+    startEventIdx = find(strcmp({EEG.event.type}, 'start'));
+    st = EEG.event(startEventIdx).latency;
+    ed = st + round(duration * EEG.srate) - 1;
+    EEG = pop_select( EEG, 'point',[st ed] ); 
+    display([num2str(duration), 'min of EEG segment relative to audio selected'])
+
+    % -- EEG Epocihing
+    % preparing onsets detected from live sounds audio
+    onset_samples = round(onsets_live * EEG.srate);
+    onset_samples = onset_samples';
+    % create new events 
+    new_events = struct( ...
+        'type', repmat({'AudioOnset'}, 1, length(onset_samples)), ...
+        'latency', num2cell(onset_samples), ...
+        'duration', num2cell(zeros(1,length(onset_samples))) ... 
+    );
+    % replace EEG events with new onset events
+    EEG.event = new_events;
+    % events with out-of-bounds latencies and removing from events and onsets
+    badevents = find([EEG.event.latency] < (abs(epoch_start) * EEG.srate) | [EEG.event.latency] > EEG.pnts); 
+    if badevents 
+        onsets(badevents) = [];
+    end
+    EEG = eeg_checkset(EEG, 'eventconsistency');
+    % epoching 
+    EEG = pop_epoch(EEG, events, [epoch_start epoch_end], 'newname', [subjid ,eegfiles{fidx}],'epochinfo', 'yes');
+    % remove artifact epochs
+    EEG = pop_jointprob(EEG, 1, [1:EEG.nbchan], PRUNE, PRUNE, 0, 1, 0);
+    EEG = eeg_checkset(EEG);
+    % baseline correction
+    baseline = [epoch_start*1000 0];  
+    EEG = pop_rmbase(EEG, baseline);
+    EEG = eeg_checkset(EEG);
+    % store eeg data 
+    eegdata = cat(3, eegdata, EEG.data);
+
+    % -- Plotting ERPs
+    if fidx == 1
+        figure('Units', 'centimeters', 'Position', s.figsize); 
+        hold on
+    end 
+    plot(EEG.times, mean(mean( EEG.data(channels2plot,:,:) ,3),1), 'Color', clr(fidx), 'LineWidth', s.plt_linewidth)
+end 
+% plotting mean of everything 
+plot(EEG.times, mean(mean( eegdata(channels2plot,:,:) ,3),1), 'Color', clr(fidx+1), 'LineWidth', s.plt_linewidth)
+legend({'Live Sounds', 'Playback', 'PlaybackNoise', 'Average'});
+xlabel('Time (ms)');
+ylabel('Amplitude (µV)');
+title(['ERPs - ' subjid]);
+set(gca, 'FontSize', s.plt_fontsize);
 
 
+% save plot
+if save_fig
+    plotname = [subjid, '_livesoundsERP'];
+    plotsave = fullfile(plotfolder, [plotname, '.png']);
+    saveas(gcf, plotsave)
+end 
+
+%% plot topographies 
+
+peaks2plot = [152 188 260 388];
+pop_topoplot(EEG, 1, peaks2plot, 'PlaybackNoise', [1 length(peaks2plot)] ,0, 'electrodes', 'on', 'chaninfo', EEG.chaninfo); 
 
