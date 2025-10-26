@@ -61,6 +61,8 @@ re_ref = 2;
 % Set 'true' to save figures to the folder
 save_fig = true;
 
+latency2shift = 104;
+
 % ------------------------------------------------------------------------
 
 %% DETECTING AUDIO ONSETS 
@@ -183,6 +185,7 @@ for fidx = 1:numel(eegfiles)
     ed = st + round(duration * EEG.srate) - 1;
     EEG = pop_select( EEG, 'point',[st ed] ); 
     display([num2str(duration), 'min of EEG segment relative to audio selected'])
+ 
 
     % -- EEG Epocihing
     % preparing onsets detected from live sounds audio
@@ -202,6 +205,16 @@ for fidx = 1:numel(eegfiles)
         onsets(badevents) = [];
     end
     EEG = eeg_checkset(EEG, 'eventconsistency');
+    % event latency correction
+    if fidx ==1
+        sampleshift = round((latency2shift/1000) * EEG.srate);  
+        for i = 1:length(EEG.event)
+            if ismember(EEG.event(i).type, events)
+                EEG.event(i).latency = EEG.event(i).latency - sampleshift;
+            end
+        end
+        EEG = eeg_checkset(EEG, 'eventconsistency');
+    end
     % epoching 
     EEG = pop_epoch(EEG, events, [epoch_start epoch_end], 'newname', [subjid ,eegfiles{fidx}],'epochinfo', 'yes');
     % remove artifact epochs
@@ -239,6 +252,116 @@ end
 
 %% plot topographies 
 
-peaks2plot = [152 188 260 388];
-pop_topoplot(EEG, 1, peaks2plot, 'PlaybackNoise', [1 length(peaks2plot)] ,0, 'electrodes', 'on', 'chaninfo', EEG.chaninfo); 
+peaks2plot = [-116 -36 24 192 316 392 484 508 736 824];
+pop_topoplot(EEG, 1, peaks2plot, 'PlaybackNoise', [1 length(peaks2plot)] ,0, 'electrodes', 'on', 'chaninfo', EEG.chaninfo); % 'maplimits', [-8 8] 
+
+
+%% ANALYSIS PLAYBACK WITH NOISE CONDITION FOR | ERPs FOR STICKS VS SOUNDSCAPE
+
+% loading playback wt noise condition EEG file
+eegfile = [subjid ,eegfiles{3}, '.set']; 
+display(['Loading EEG file ', eegfile])
+EEG = pop_loadset('filename', eegfile, 'filepath', filepath);
+% filtering
+disp(['Data Filtering: LP = ', num2str(LP), ' HP = ', num2str(HP)])
+EEG = pop_firws(EEG, 'fcutoff', LP, 'ftype', 'lowpass', 'wtype', 'hamming', 'forder', LPorder);
+EEG = pop_firws(EEG, 'fcutoff', HP, 'ftype', 'highpass', 'wtype', 'hamming', 'forder', HPorder);
+% re-referencing
+if re_ref == 1
+    % re-referencing to CAR
+    EEG = pop_reref(EEG, [], 'refstate',0);
+    display('Re-referenced to CAR')
+elseif re_ref == 2
+    % re-referencing to mastoids
+    EEG = pop_reref( EEG, [11 15] );
+    display('Re-referenced to Mastoids')
+end 
+% select the EEG segment during the audio 
+startEventIdx = find(strcmp({EEG.event.type}, 'start'));
+st = EEG.event(startEventIdx).latency;
+ed = st + round(duration * EEG.srate) - 1;
+EEG = pop_select( EEG, 'point',[st ed] ); 
+display([num2str(duration), 'min of EEG segment relative to audio selected'])
+
+% seperate the files
+EEGsticks     = EEG;
+EEGsoundscape = EEG;
+eegdata       = [];
+
+
+% epoching sticks EEG 
+onsets_live_samples = round(onsets_live * EEGsticks.srate);
+onsets_live_samples = onsets_live_samples';
+% create new events 
+sticks_events = struct( ...
+    'type', repmat({'AudioOnset'}, 1, length(onsets_live_samples)), ...
+    'latency', num2cell(onsets_live_samples), ...
+    'duration', num2cell(zeros(1,length(onsets_live_samples))) ... 
+);
+% replace events
+EEGsticks.event = sticks_events;
+EEGsticks = eeg_checkset(EEGsticks, 'eventconsistency');
+% epoching 
+EEGsticks = pop_epoch(EEGsticks, events, [epoch_start epoch_end], 'newname', [subjid ,eegfiles{3},'_sticks'],'epochinfo', 'yes');
+% remove artifact epochs
+EEGsticks = pop_jointprob(EEGsticks, 1, [1:EEGsticks.nbchan], PRUNE, PRUNE, 0, 1, 0);
+EEGsticks = eeg_checkset(EEGsticks);
+% baseline correction
+baseline = [epoch_start*1000 0];  
+EEGsticks = pop_rmbase(EEGsticks, baseline);
+EEGsticks = eeg_checkset(EEGsticks);
+% store eeg data 
+eegdata = cat(3, eegdata, EEGsticks.data);
+
+
+% epoching soundscape EEG 
+onsets_soundscape_samples = round(onsets_soundscape * EEGsoundscape.srate);
+onsets_soundscape_samples = onsets_soundscape_samples';
+% create new events 
+soundscpae_events = struct( ...
+    'type', repmat({'AudioOnset'}, 1, length(onsets_soundscape_samples)), ...
+    'latency', num2cell(onsets_soundscape_samples), ...
+    'duration', num2cell(zeros(1,length(onsets_soundscape_samples))) ... 
+);
+% replace events
+EEGsoundscape.event = soundscpae_events;
+EEGsoundscape = eeg_checkset(EEGsoundscape, 'eventconsistency');
+% epoching 
+EEGsoundscape = pop_epoch(EEGsoundscape, events, [epoch_start epoch_end], 'newname', [subjid ,eegfiles{3},'_soundscape'],'epochinfo', 'yes');
+% remove artifact epochs
+EEGsoundscape = pop_jointprob(EEGsoundscape, 1, [1:EEGsoundscape.nbchan], PRUNE, PRUNE, 0, 1, 0);
+EEGsoundscape = eeg_checkset(EEGsoundscape);
+% baseline correction
+baseline = [epoch_start*1000 0];  
+EEGsoundscape = pop_rmbase(EEGsoundscape, baseline);
+EEGsoundscape = eeg_checkset(EEGsoundscape);
+% store eeg data 
+eegdata = cat(3, eegdata, EEGsoundscape.data);
+
+
+% channels to plot 
+if re_ref == 2
+    channels2plot = [8 4 9 13];
+else 
+    channels2plot = [8 4 9 14];
+end 
+
+% plotting ERPs
+figure('Units', 'centimeters', 'Position', s.figsize); 
+hold on
+plot(EEGsticks.times, mean(mean( EEGsticks.data(channels2plot,:,:) ,3),1), 'Color', 'r', 'LineWidth', s.plt_linewidth)
+plot(EEGsoundscape.times, mean(mean( EEGsoundscape.data(channels2plot,:,:) ,3),1), 'Color', 'b', 'LineWidth', s.plt_linewidth)
+plot(EEGsticks.times, mean(mean( eegdata(channels2plot,:,:) ,3),1), 'Color', clr(fidx+1), 'LineWidth', s.plt_linewidth)
+legend({'Sticks', 'Soundscape', 'Average'}, "Location", "southeast");
+xlabel('Time (ms)');
+ylabel('Amplitude (µV)');
+title(['ERP of Sticks vs Soundscape Scene - ' subjid]);
+set(gca, 'FontSize', s.plt_fontsize);
+
+% save plot
+if save_fig
+    plotname = [subjid, '_stickssoundscapeERP'];
+    plotsave = fullfile(plotfolder, [plotname, '.png']);
+    saveas(gcf, plotsave)
+end 
 
